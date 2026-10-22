@@ -61,11 +61,11 @@ new #[Layout('layouts::kitchen')] #[Title('Cocina')] class extends Component
             ->get();
     }
 
-    public function markReady(int $id): void
+    public function markReady(int $id, ?int $expectedVersion = null): void
     {
         $order = Order::find($id);
 
-        if (! OrderFlow::markReady($id)) {
+        if (! OrderFlow::markReady($id, $expectedVersion)) {
             $this->dispatch('toast', message: 'El pedido cambió y ya no se puede marcar listo. Recarga la lista.', type: 'error');
 
             return;
@@ -103,7 +103,7 @@ new #[Layout('layouts::kitchen')] #[Title('Cocina')] class extends Component
             } catch (e) {}
         },
         toggleSound() {
-            this.sound = ! this.sound;
+            this.sound = ! this.audioReady || ! this.sound;
             try { localStorage.setItem('cocina:sonido', this.sound ? 'si' : 'no') } catch (e) {}
             this.unlock();
             this.$nextTick(() => this.beep());
@@ -141,8 +141,8 @@ new #[Layout('layouts::kitchen')] #[Title('Cocina')] class extends Component
             <span class="num shrink-0 rounded-full bg-[#ffc233] px-3 py-0.5 text-2xl font-bold text-[#33200f]">{{ $this->queue->count() }}</span>
         </div>
         <div class="flex shrink-0 items-center gap-2 sm:gap-3">
-            <button type="button" @click="toggleSound()" class="inline-flex h-11 items-center gap-2 rounded-xl bg-white/10 px-3 text-sm font-semibold hover:bg-white/15"
-                    :aria-pressed="sound" :aria-label="sound ? 'Apagar sonido de pedidos nuevos' : 'Prender sonido de pedidos nuevos'">
+            <button type="button" @pointerdown.stop @click="toggleSound()" class="inline-flex h-11 items-center gap-2 rounded-xl bg-white/10 px-3 text-sm font-semibold hover:bg-white/15"
+                    :aria-pressed="sound && audioReady" :aria-label="sound && audioReady ? 'Apagar sonido de pedidos nuevos' : 'Prender sonido de pedidos nuevos'">
                 <span x-show="sound"><x-icon name="bell" class="size-5" /></span>
                 <span x-show="! sound" x-cloak><x-icon name="bell-off" class="size-5" /></span>
                 {{-- En celulares angostos solo el ícono: el texto empujaba la hora fuera de la pantalla. --}}
@@ -243,7 +243,7 @@ new #[Layout('layouts::kitchen')] #[Title('Cocina')] class extends Component
                             @endforeach
                         </ul>
                         <div class="p-3 pt-0">
-                            <button type="button" wire:click="markReady({{ $order->id }})" @if ($loop->first) data-tour="cocina-listo" @endif class="flex min-h-16 w-full items-center justify-center gap-2 rounded-2xl bg-[#17803d] text-2xl font-bold text-white hover:bg-[#156f35] motion-safe:active:scale-[0.98]">
+                            <button type="button" wire:click="markReady({{ $order->id }}, {{ $order->version }})" @if ($loop->first) data-tour="cocina-listo" @endif class="flex min-h-16 w-full items-center justify-center gap-2 rounded-2xl bg-[#17803d] text-2xl font-bold text-white hover:bg-[#156f35] motion-safe:active:scale-[0.98]">
                                 <x-icon name="check" class="size-7" /> Listo
                             </button>
                         </div>

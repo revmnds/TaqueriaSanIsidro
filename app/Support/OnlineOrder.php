@@ -68,7 +68,7 @@ class OnlineOrder
 
         // Solo se reconoce un envío repetido de un pedido en línea; un token de otra clase de pedido no devuelve nada.
         if ($token && $existing = Order::where('operation_token', $token)->where('source', 'online')->first()) {
-            return $existing;
+            return self::latestCorrection($existing);
         }
 
         self::throttleAttempts($ip);
@@ -105,6 +105,10 @@ class OnlineOrder
 
         if ($errors) {
             throw ValidationException::withMessages($errors);
+        }
+
+        if (is_array($input['lines'] ?? null) && count($input['lines']) > self::MAX_LINES) {
+            throw ValidationException::withMessages(['lines' => 'El pedido puede tener hasta '.self::MAX_LINES.' renglones. Quita algunos productos y vuelve a enviarlo.']);
         }
 
         $built = OrderBuilder::items(self::cleanLines($input['lines'] ?? []));
@@ -150,7 +154,7 @@ class OnlineOrder
                     // El mismo formulario llegó dos veces: gana el primero y el otro recibe ese mismo pedido.
                     $existing = $token ? Order::where('operation_token', $token)->where('source', 'online')->first() : null;
 
-                    return $existing ?? self::create(null, $name, $phone, $service, $address, $references, $notes, $built, $telegramChat);
+                    return $existing ? self::latestCorrection($existing) : self::create(null, $name, $phone, $service, $address, $references, $notes, $built, $telegramChat);
                 }
             });
         } catch (LockTimeoutException) {
@@ -158,6 +162,16 @@ class OnlineOrder
         }
 
         self::broadcast(new OnlineOrderPlaced($order));
+
+        return $order;
+    }
+
+    /** Un reenvío del formulario original conserva la idempotencia después de corregir el cobro. */
+    protected static function latestCorrection(Order $order): Order
+    {
+        while ($replacement = Order::where('replaces_order_id', $order->id)->where('source', 'online')->first()) {
+            $order = $replacement;
+        }
 
         return $order;
     }
@@ -197,7 +211,9 @@ class OnlineOrder
     /** El taquero acepta: entra a Pedidos y Cocina como cualquier pedido por cobrar, con su número del día. */
     public static function accept(Order $order): bool
     {
-        $accepted = Cache::lock('orders:daily-number', 10)->block(5, fn () => DB::transaction(function () use ($order) {
+        $accepted = DB::transaction(function () use ($order) {
+            // El mismo candado que usa la caja protege la lectura y asignación del número diario.
+            DB::select('SELECT pg_advisory_xact_lock(72431901)');
             $locked = Order::whereKey($order->id)->where('status', OrderStatus::Requested)->lockForUpdate()->first();
 
             if (! $locked) {
@@ -220,7 +236,7 @@ class OnlineOrder
             ]);
 
             return $locked;
-        }));
+        });
 
         return (bool) $accepted;
     }
@@ -339,10 +355,10 @@ class OnlineOrder
             return [];
         }
 
-        return collect($lines)->take(self::MAX_LINES)->filter(fn ($l) => is_array($l) && is_numeric($l['product_id'] ?? null))
+        return collect($lines)->filter(fn ($l) => is_array($l) && self::validId($l['product_id'] ?? null))
             ->map(fn (array $l) => [
                 'product_id' => (int) $l['product_id'],
-                'qty' => max(1, min(self::MAX_QUANTITY, (int) ($l['qty'] ?? 1))),
+                'qty' => self::quantity($l['qty'] ?? null),
                 'without' => self::ids($l['without'] ?? []),
                 'extras' => self::ids($l['extras'] ?? []),
                 'choices' => self::ids($l['choices'] ?? []),
@@ -353,7 +369,29 @@ class OnlineOrder
     /** @return array<int, int> */
     protected static function ids(mixed $value): array
     {
-        return is_array($value) ? collect($value)->filter(fn ($id) => is_numeric($id))->map(fn ($id) => (int) $id)->unique()->take(20)->values()->all() : [];
+        return is_array($value) ? collect($value)->filter(fn ($id) => self::validId($id))->map(fn ($id) => (int) $id)->unique()->take(20)->values()->all() : [];
+    }
+
+    protected static function validId(mixed $value): bool
+    {
+        return is_numeric($value) && is_finite((float) $value) && (float) $value >= 1 && (float) $value <= 2147483647;
+    }
+
+    protected static function quantity(mixed $value): int
+    {
+        if (! is_numeric($value) || ! is_finite((float) $value)) {
+            return 1;
+        }
+
+        if ((float) $value >= self::MAX_QUANTITY) {
+            return self::MAX_QUANTITY;
+        }
+
+        if ((float) $value <= 1) {
+            return 1;
+        }
+
+        return (int) $value;
     }
 
     protected static function assertOpen(): void

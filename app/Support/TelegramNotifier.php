@@ -4,6 +4,7 @@ namespace App\Support;
 
 use App\Enums\OrderStatus;
 use App\Models\Order;
+use Carbon\CarbonInterface;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 
@@ -73,7 +74,9 @@ class TelegramNotifier
     public static function refreshStaff(Order $order): void
     {
         foreach (DB::table('telegram_notices')->where('order_id', $order->id)->get() as $notice) {
-            Telegram::edit((int) $notice->chat_id, (int) $notice->message_id, self::staffText($order), self::staffKeyboard($order));
+            if (Telegram::isStaff((int) $notice->chat_id)) {
+                Telegram::edit((int) $notice->chat_id, (int) $notice->message_id, self::staffText($order), self::staffKeyboard($order));
+            }
         }
     }
 
@@ -92,23 +95,23 @@ class TelegramNotifier
     }
 
     /** Resumen del día para el taquero al cerrar. */
-    public static function summary(): void
+    public static function summary(?CarbonInterface $at = null): void
     {
         if (! Telegram::enabled() || Telegram::staffChats() === []) {
             return;
         }
 
-        $text = self::summaryText();
+        $text = self::summaryText($at);
 
         foreach (Telegram::staffChats() as $chat) {
             Telegram::send((int) $chat['id'], $text);
         }
     }
 
-    /** Ventas del día de trabajo en curso: lo que se manda al cerrar y lo que el taquero pide con /hoy. */
-    public static function summaryText(): string
+    /** Ventas del día de trabajo del momento indicado; /hoy usa el momento actual. */
+    public static function summaryText(?CarbonInterface $at = null): string
     {
-        $day = BusinessDay::of(now());
+        $day = BusinessDay::of($at ?? now());
         $paid = Order::paidBetween(BusinessDay::start($day), BusinessDay::end($day))->get();
         $online = $paid->where('source', 'online');
         $unpaid = Order::where('status', OrderStatus::Open)->count();
@@ -121,6 +124,46 @@ class TelegramNotifier
     }
 
     public static function staffText(Order $order): string
+    {
+        $full = self::fullStaffText($order);
+
+        if (mb_strlen($full) <= 3500) {
+            return $full;
+        }
+
+        $lines = [$order->isOnline()
+            ? '<b>Pedido en línea de '.Telegram::esc($order->label).'</b>'
+            : '<b>Pedido'.($order->daily_number ? ' #'.$order->daily_number : '').($order->label ? ' de '.Telegram::esc($order->label) : '').'</b>'];
+
+        if ($order->isDelivery()) {
+            $lines[] = 'A domicilio: '.Telegram::esc($order->delivery_address);
+        } elseif ($order->isOnline()) {
+            $lines[] = 'Pasa a recoger';
+        } elseif ($service = $order->serviceLabel()) {
+            $lines[] = $service;
+        }
+
+        if ($phone = $order->customer_phone ?: $order->delivery_phone) {
+            $lines[] = 'Teléfono: '.Telegram::esc($phone);
+        }
+
+        $lines[] = $order->items->count().' renglones.';
+        $lines[] = 'Total: '.money($order->total).self::payment($order);
+
+        if (in_array($order->status, [OrderStatus::Requested, OrderStatus::Open], true)) {
+            $lines[] = 'Ver detalle actualizado en Pedidos: '.Telegram::esc(route('pedidos'));
+        } elseif (! $order->isOnline() || $order->accepted_at !== null) {
+            $lines[] = 'Ver detalle actualizado en Ventas: '.Telegram::esc(route('ventas'));
+        }
+
+        if ($footer = self::footer($order)) {
+            $lines[] = '<b>'.Telegram::esc($footer).'</b>';
+        }
+
+        return implode("\n", $lines);
+    }
+
+    protected static function fullStaffText(Order $order): string
     {
         $lines = [$order->isOnline()
             ? '<b>Pedido en línea de '.Telegram::esc($order->label).'</b>'
@@ -143,8 +186,8 @@ class TelegramNotifier
         foreach ($order->items as $item) {
             $details = array_filter([
                 ...collect($item->choices())->pluck('name')->all(),
-                ...array_map(fn ($n) => 'sin '.mb_strtolower($n), $item->withoutNames()),
-                ...collect($item->extras())->map(fn ($e) => '+ '.$e['name'])->all(),
+                ...array_map(fn ($name) => 'sin '.mb_strtolower($name), $item->withoutNames()),
+                ...collect($item->extras())->map(fn ($extra) => '+ '.$extra['name'])->all(),
                 $item->notes ? '"'.$item->notes.'"' : null,
             ]);
             $lines[] = $item->quantity.' x '.Telegram::esc($item->product_name).($details ? ' ('.Telegram::esc(implode(', ', $details)).')' : '');

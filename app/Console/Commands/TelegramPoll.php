@@ -37,7 +37,9 @@ class TelegramPoll extends Command
             return self::FAILURE;
         }
 
-        $offset = max(0, (int) Cache::get('telegram:offset', 0));
+        $botId = explode(':', Telegram::token() ?? '', 2)[0];
+        $offsetKey = 'telegram:offset:'.$botId;
+        $offset = max(0, (int) Cache::get($offsetKey, 0));
         $this->info('Consultando Telegram. Para terminar usa Ctrl+C.');
 
         while ($running) {
@@ -47,10 +49,15 @@ class TelegramPoll extends Command
                 'allowed_updates' => ['message', 'callback_query'],
             ], timeout: 35);
 
-            if (is_array($updates)) {
-                // Proceso largo: los ajustes (chats del taquero, tienda) pudieron cambiar desde la web.
-                Setting::flush();
+            // Proceso largo: los ajustes pudieron cambiar desde la web, incluso si Telegram no respondió.
+            Setting::flush();
+            if (explode(':', Telegram::token() ?? '', 2)[0] !== $botId) {
+                $this->warn('El bot cambió mientras se consultaban mensajes. Reinicia telegram:poll.');
 
+                return self::FAILURE;
+            }
+
+            if (is_array($updates)) {
                 foreach ($updates as $update) {
                     if (! $running) {
                         break;
@@ -69,7 +76,7 @@ class TelegramPoll extends Command
 
                     // Un mensaje que falla tampoco debe bloquear los siguientes al reiniciar.
                     $offset = $update['update_id'] + 1;
-                    Cache::forever('telegram:offset', $offset);
+                    Cache::forever($offsetKey, $offset);
                 }
             } else {
                 $this->warn('Telegram no respondió. Se volverá a intentar.');

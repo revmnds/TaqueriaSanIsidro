@@ -115,20 +115,33 @@ class TelegramBot
         $current = '';
 
         foreach ($products as $category => $group) {
-            $block = '<b>'.Telegram::esc($category)."</b>\n".$group->map(fn (Product $p) => Telegram::esc($p->name).'  '.money($p->price).($p->isSoldOut() ? ' (agotado hoy)' : ''))->join("\n")."\n\n";
+            $header = '<b>'.Telegram::esc($category)."</b>\n";
+            $hasHeader = false;
 
-            if (mb_strlen($current.$block) > 3500) {
-                $chunks[] = $current;
-                $current = '';
+            foreach ($group as $product) {
+                $line = Telegram::esc($product->name).'  '.money($product->price).($product->isSoldOut() ? ' (agotado hoy)' : '')."\n";
+                $prefix = $hasHeader ? '' : $header;
+
+                if ($current !== '' && mb_strlen($current.$prefix.$line) > 3500) {
+                    $chunks[] = rtrim($current);
+                    $current = '';
+                    $hasHeader = false;
+                    $prefix = $header;
+                }
+
+                $current .= $prefix.$line;
+                $hasHeader = true;
             }
 
-            $current .= $block;
+            $current .= "\n";
         }
 
-        $chunks[] = $current;
+        if ($current !== '') {
+            $chunks[] = rtrim($current);
+        }
 
         foreach ($chunks as $i => $chunk) {
-            Telegram::send($chatId, rtrim($chunk), $i === array_key_last($chunks) ? self::mainKeyboard(true, $chatId) : null);
+            Telegram::send($chatId, $chunk, $i === array_key_last($chunks) ? self::mainKeyboard(true, $chatId) : null);
         }
     }
 

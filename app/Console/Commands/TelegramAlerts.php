@@ -3,6 +3,7 @@
 namespace App\Console\Commands;
 
 use App\Models\Order;
+use App\Support\BusinessDay;
 use App\Support\OnlineOrder;
 use App\Support\Store;
 use App\Support\Telegram;
@@ -32,8 +33,8 @@ class TelegramAlerts extends Command
                 if (Store::mode() === 'auto'
                     && Store::isOpenBySchedule(now()->subMinute())
                     && ! Store::isOpenBySchedule(now())
-                    && Cache::add('telegram:summary:'.today()->toDateString(), true, now()->addDay())) {
-                    $notifier->summary();
+                    && Cache::add('telegram:summary:'.BusinessDay::of(now()->subMinute())->toDateString(), true, now()->addDay())) {
+                    $notifier->summary(now()->subMinute());
                 }
             }
         } finally {

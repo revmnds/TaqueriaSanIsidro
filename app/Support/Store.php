@@ -131,8 +131,8 @@ class Store
             'open' => $open,
             'manual' => $mode !== 'auto',
             'message' => self::message(),
-            'closes_at' => $open ? $window['end'] ?? null : null,
-            'opens_at' => $open ? null : self::nextOpening($at),
+            'closes_at' => $mode === 'auto' && $open ? $window['end'] ?? null : null,
+            'opens_at' => $mode === 'auto' && ! $open ? self::nextOpening($at) : null,
         ];
     }
 

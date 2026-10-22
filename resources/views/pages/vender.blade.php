@@ -63,6 +63,10 @@ new #[Title('Vender')] class extends Component
     /** Hora de recogida (HH:MM) si el pedido es para más tarde. */
     public ?string $pickupTime = null;
 
+    /** Fecha completa guardada; una hora sin cambios no se reprograma al día siguiente al cobrar. */
+    #[Locked]
+    public ?string $savedPickupAt = null;
+
     public string $method = 'cash';
 
     /** Descuento al pedido: monto en pesos o porcentaje. */
@@ -115,11 +119,12 @@ new #[Title('Vender')] class extends Component
 
         if ($correcting) {
             $this->orderId = null;
-            $this->correct($correcting);
-            $this->correcting = true;
-            $this->openPay = true;
+            if ($this->correct($correcting)) {
+                $this->correcting = true;
+                $this->openPay = true;
 
-            return;
+                return;
+            }
         }
 
         $order = $this->orderId ? Order::with('items')->where('status', OrderStatus::Open)->find($this->orderId) : null;
@@ -149,6 +154,7 @@ new #[Title('Vender')] class extends Component
         $this->discount = (float) $order->discount > 0 ? $this->plain($order->discount) : null;
         $this->discountType = 'amount';
         $this->pickupTime = $order->pickup_at?->format('H:i');
+        $this->savedPickupAt = $order->pickup_at?->format('Y-m-d H:i:s');
         $this->savedFee = in_array($order->service, ['togo', 'delivery'], true) ? (float) $order->packaging_fee : null;
     }
 
@@ -246,6 +252,12 @@ new #[Title('Vender')] class extends Component
         return $field ? ['ok' => false, 'error' => $error, 'field' => $field] : ['ok' => false, 'error' => $error];
     }
 
+    /** El navegador debe traer el catálogo nuevo antes de intentar este cobro otra vez. */
+    protected function pricesChanged(): array
+    {
+        return [...$this->fail('El total cambió mientras cobrabas. Revisa el nuevo importe y vuelve a confirmar.'), 'prices_changed' => true];
+    }
+
     protected function deliveryError(): ?array
     {
         return $this->service === 'delivery' && trim((string) $this->address) === ''
@@ -311,6 +323,10 @@ new #[Title('Vender')] class extends Component
             return null;
         }
 
+        if ($this->savedPickupAt && substr($this->savedPickupAt, 11, 5) === $this->pickupTime) {
+            return \Carbon\Carbon::parse($this->savedPickupAt);
+        }
+
         $at = today()->setTimeFromTimeString($this->pickupTime);
 
         // Una hora que ya pasó hace rato (ej. 00:30 capturado a las 23:00) es para el día siguiente.
@@ -353,13 +369,13 @@ new #[Title('Vender')] class extends Component
      * Guarda el pedido bajo candado. Devuelve un error legible si cambió el formulario
      * o null si el pedido ya se cobró o se canceló en otro dispositivo.
      */
-    protected function store(OrderStatus $status, array $built): Order|array|null
+    protected function store(OrderStatus $status, array $built, ?float $expectedTotal = null): Order|array|null
     {
         if (! Str::isUuid($this->operationToken)) {
             return $this->fail('Algo falló al enviar el pedido. Recarga la página e inténtalo otra vez.');
         }
 
-        return DB::transaction(function () use ($status, $built) {
+        return DB::transaction(function () use ($status, $built, $expectedTotal) {
             // El candado de Postgres se comparte entre dispositivos y dura toda la transacción.
             DB::select('SELECT pg_advisory_xact_lock(72431901)');
             if ($existing = $this->completedOperation()) {
@@ -388,6 +404,12 @@ new #[Title('Vender')] class extends Component
                     'operation_token' => $this->operationToken,
                     'replaces_order_id' => $undone?->id,
                     'daily_number' => $keepNumber ? $undone->daily_number : Order::nextDailyNumber(),
+                    'source' => $undone?->source ?? 'pos',
+                    'customer_phone' => $undone?->customer_phone,
+                    'telegram_chat_id' => $undone?->telegram_chat_id,
+                    'accepted_at' => $undone?->accepted_at,
+                    'notes' => $undone?->notes,
+                    'public_token' => $undone?->source === 'online' ? $undone->public_token : null,
                     // Con su mismo número conserva su lugar en la cocina y el tiempo que lleva esperando.
                     'sold_at' => $keepNumber ? $undone->sold_at : now(),
                 ]);
@@ -411,6 +433,9 @@ new #[Title('Vender')] class extends Component
             $total = round(max(0, $base - $this->discountFor($base)) + $this->deliveryFeeAmount(), 2);
             if (! is_finite($total) || $base > OrderBuilder::MAX_TOTAL || $total + ($paid ? $this->tipAmount() : 0) > OrderBuilder::MAX_TOTAL) {
                 return $this->fail('El total es demasiado alto. Revisa las cantidades.');
+            }
+            if ($paid && $expectedTotal !== null && abs($expectedTotal - round($total + $this->tipAmount(), 2)) > 0.009) {
+                return $this->pricesChanged();
             }
             if ($paid && ($failure = $this->paymentError($total + $this->tipAmount()))) {
                 return $failure;
@@ -438,6 +463,10 @@ new #[Title('Vender')] class extends Component
                 $order->fill(['ready_at' => null, 'dispatched_at' => null, 'delivered_at' => null, 'changed_at' => now()]);
             }
 
+            // El enlace del cliente tiene dueño único: se mueve al sustituto en la misma transacción.
+            if ($undone?->source === 'online' && $undone->public_token) {
+                $undone->update(['public_token' => null]);
+            }
             $order->save();
 
             OrderBuilder::fill($order, $built);
@@ -465,7 +494,7 @@ new #[Title('Vender')] class extends Component
 
     protected function finish(): void
     {
-        $this->reset('lines', 'label', 'reference', 'received', 'orderId', 'openPay', 'pickupTime', 'discount', 'tip', 'cashPart', 'address', 'phone', 'addressNotes', 'deliveryFee', 'dailyNumber', 'undoneId', 'savedFee', 'correcting');
+        $this->reset('lines', 'label', 'reference', 'received', 'orderId', 'openPay', 'pickupTime', 'savedPickupAt', 'discount', 'tip', 'cashPart', 'address', 'phone', 'addressNotes', 'deliveryFee', 'dailyNumber', 'undoneId', 'savedFee', 'correcting');
         $this->operationToken = (string) Str::uuid();
         $this->orderVersion = null;
         $this->openedOrderId = null;
@@ -526,7 +555,7 @@ new #[Title('Vender')] class extends Component
     }
 
     /** @return array{ok: bool, error?: string, closed?: bool} */
-    public function charge(): array
+    public function charge(mixed $expectedTotal = null): array
     {
         if ($order = $this->completedOperation()) {
             return $this->charged($order);
@@ -534,6 +563,10 @@ new #[Title('Vender')] class extends Component
 
         if (! PaymentMethod::tryFrom($this->method)) {
             return ['ok' => false, 'error' => 'Elige la forma de pago.'];
+        }
+
+        if ($expectedTotal !== null && (! is_numeric($expectedTotal) || ! is_finite((float) $expectedTotal) || (float) $expectedTotal < 0)) {
+            return $this->fail('El total mostrado no es válido. Actualiza la página y vuelve a cobrar.');
         }
 
         $built = OrderBuilder::items($this->lines);
@@ -545,11 +578,15 @@ new #[Title('Vender')] class extends Component
         $base = $built['total'] + $this->feeFor($this->service);
         $due = max(0, $base - $this->discountFor($base)) + $this->deliveryFeeAmount() + $this->tipAmount();
 
+        if ($expectedTotal !== null && abs((float) $expectedTotal - round($due, 2)) > 0.009) {
+            return $this->pricesChanged();
+        }
+
         if ($failure = $this->paymentError($due)) {
             return $failure;
         }
 
-        $order = $this->store(OrderStatus::Paid, $built);
+        $order = $this->store(OrderStatus::Paid, $built, $expectedTotal === null ? null : (float) $expectedTotal);
 
         if (is_array($order)) {
             return $order;
@@ -621,6 +658,8 @@ new #[Title('Vender')] class extends Component
 
         if ($order && $order->status === OrderStatus::Paid && ! $order->paid_at?->gt(now()->subMinutes(self::UNDO_MINUTES))) {
             $this->dispatch('toast', message: 'Ya pasaron más de '.self::UNDO_MINUTES.' minutos. Corrígela desde Pedidos.', type: 'error');
+        } elseif ($order && $order->status === OrderStatus::Paid && (! ($order->paid_at ?? $order->sold_at) || ! BusinessDay::isCurrent($order->countedAt()))) {
+            $this->dispatch('toast', message: 'Esta venta ya pertenece al día anterior y no se puede corregir.', type: 'error');
         } elseif ($order && $order->status === OrderStatus::Paid) {
             $this->correct($order);
         }
@@ -629,11 +668,12 @@ new #[Title('Vender')] class extends Component
     }
 
     /** Cancela una venta y regresa el pedido completo (servicio, domicilio, descuento, pago) para corregirlo y volver a cobrarlo. */
-    protected function correct(Order $order): void
+    protected function correct(Order $order): bool
     {
+        $countedAt = $order->paid_at ?? $order->sold_at;
         $order = DB::transaction(function () use ($order) {
             $current = Order::with(['items', 'payments'])->whereKey($order->id)->lockForUpdate()->first();
-            if (! $current || $current->status !== OrderStatus::Paid) {
+            if (! $current || $current->status !== OrderStatus::Paid || ! ($current->paid_at ?? $current->sold_at) || ! BusinessDay::isCurrent($current->countedAt())) {
                 return null;
             }
             $current->cancel(Order::CORRECTION);
@@ -641,9 +681,12 @@ new #[Title('Vender')] class extends Component
             return $current;
         });
         if (! $order) {
-            $this->dispatch('toast', message: 'La venta cambió en otro dispositivo. Recarga la página.', type: 'error');
+            $message = ! $countedAt || ! BusinessDay::isCurrent($countedAt)
+                ? 'Esta venta ya pertenece al día anterior y no se puede corregir.'
+                : 'La venta cambió en otro dispositivo. Recarga la página.';
+            $this->dispatch('toast', message: $message, type: 'error');
 
-            return;
+            return false;
         }
         $this->orderId = null;
         $this->operationToken = (string) Str::uuid();
@@ -665,6 +708,8 @@ new #[Title('Vender')] class extends Component
         $this->dispatch('order-restored', later: (bool) $this->pickupTime, discount: (bool) $this->discount);
         $this->dispatch('toast', message: 'Venta cancelada. El pedido volvió para corregirlo.');
         $this->dispatch('pending-count', count: Order::pendingCount());
+
+        return true;
     }
 };
 ?>
@@ -720,8 +765,9 @@ new #[Title('Vender')] class extends Component
         async refresh() {
             try {
                 const r = await $wire.freshCatalog();
-                if (r?.catalog) { this.catalog = r.catalog; this.fee = r.fee; this.deliveryDefault = r.delivery }
+                if (r?.catalog) { this.catalog = r.catalog; this.fee = r.fee; this.deliveryDefault = r.delivery; return true }
             } catch (e) {}
+            return false;
         },
         openSheet() { this.error = ''; this.sheet = true; this.refresh() },
         // Borrador del pedido en este equipo: sobrevive a una recarga o a salir de Vender sin cobrar.
@@ -973,7 +1019,7 @@ new #[Title('Vender')] class extends Component
             this.busy = true;
             const editing = !! $wire.orderId;
             try {
-                const r = await $wire[action]();
+                const r = action === 'charge' ? await $wire.charge(this.due()) : await $wire[action]();
                 if (r?.ok) {
                     this.sheet = false;
                     if (editing) {
@@ -987,7 +1033,8 @@ new #[Title('Vender')] class extends Component
                     this.sheet = false;
                     if (editing) this.restoreDraft('Volvió el pedido que estabas armando.');
                 } else {
-                    this.error = r?.error ?? 'No se pudo guardar.';
+                    const refreshed = r?.prices_changed ? await this.refresh() : true;
+                    this.error = refreshed ? (r?.error ?? 'No se pudo guardar.') : 'El total cambió. Recarga la página, revisa el nuevo importe y vuelve a confirmar.';
                     if (r?.field) this.focusField(r.field);
                 }
             } catch (e) {

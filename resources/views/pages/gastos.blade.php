@@ -7,6 +7,7 @@ use App\Support\BusinessDay;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 use Livewire\Attributes\Computed;
 use Livewire\Attributes\Title;
 use Livewire\Component;
@@ -148,8 +149,14 @@ new #[Title('Gastos')] class extends Component
         }
 
         DB::transaction(function () use ($data) {
-            $previousIngredient = $this->editingId ? Expense::whereKey($this->editingId)->value('ingredient_id') : null;
-            $expense = Expense::updateOrCreate(['id' => $this->editingId], $data + ['user_id' => auth()->id()]);
+            $expense = $this->editingId ? Expense::lockForUpdate()->find($this->editingId) : new Expense;
+
+            if (! $expense) {
+                throw ValidationException::withMessages(['total' => 'Este gasto se borró en otro equipo. Cierra el formulario y revisa la lista.']);
+            }
+
+            $previousIngredient = $expense->ingredient_id;
+            $expense->fill($data + ['user_id' => auth()->id()])->save();
 
             // El costo del insumo sigue a su compra más reciente; si el gasto cambió de insumo, también se recalcula el anterior.
             Ingredient::whereIn('id', array_filter([$previousIngredient, $expense->ingredient_id]))->get()->each->syncCostFromPurchases();

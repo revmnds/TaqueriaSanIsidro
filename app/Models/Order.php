@@ -36,10 +36,13 @@ class Order extends Model
             }
         });
 
-        // Un pedido de la caja aparece en la cocina de otra pantalla; los de en línea ya avisan al llegar (OnlineOrderPlaced).
+        // El sustituto de un pedido en línea vuelve a avisar al cliente por el mismo enlace.
         static::created(function (Order $order) {
-            if ($order->source !== 'online') {
+            if ($order->source !== 'online' || $order->replaces_order_id) {
                 OnlineOrder::broadcast(new OrdersChanged($order));
+            }
+            if ($order->source === 'online' && $order->replaces_order_id && $order->public_token) {
+                OnlineOrder::broadcast(new OnlineOrderUpdated($order));
             }
         });
     }
@@ -116,10 +119,14 @@ class Order extends Model
     public function customerStage(): array
     {
         $delivery = $this->isDelivery();
+        $paid = $this->status === OrderStatus::Paid;
 
         if ($this->status === OrderStatus::Cancelled) {
             if ($this->cancel_reason === self::CUSTOMER_CANCELLED) {
                 return ['key' => 'customer-cancelled', 'step' => 0, 'title' => 'Cancelaste tu pedido', 'text' => 'No hay nada que pagar. Cuando quieras, puedes hacer otro.', 'tone' => 'muted'];
+            }
+            if ($this->cancel_reason === self::CORRECTION) {
+                return ['key' => 'correcting', 'step' => 3, 'title' => 'Estamos corrigiendo tu pedido', 'text' => 'La taquería está actualizando los detalles. Aquí mismo verás el pedido corregido.', 'tone' => 'wait'];
             }
 
             return $this->accepted_at
@@ -130,9 +137,9 @@ class Order extends Model
         return match (true) {
             $this->status === OrderStatus::Requested => ['key' => 'requested', 'step' => 1, 'title' => 'Recibimos tu pedido', 'text' => 'Esperando a que la taquería lo acepte. Deja esta página abierta: aquí mismo te avisamos.', 'tone' => 'wait'],
             $this->delivered_at !== null => ['key' => 'delivered', 'step' => 5, 'title' => 'Tu pedido fue entregado', 'text' => 'Gracias por tu pedido. ¡Buen provecho!', 'tone' => 'good'],
-            $this->dispatched_at !== null => ['key' => 'on-the-way', 'step' => 4, 'title' => 'Tu pedido va en camino', 'text' => 'Ya salió del puesto. Ten tu dinero listo para pagar al recibirlo.', 'tone' => 'good'],
-            $this->ready_at !== null => ['key' => 'ready', 'step' => 4, 'title' => $delivery ? 'Tu pedido está listo' : '¡Tu pedido está listo!', 'text' => $delivery ? 'En un momento sale con el repartidor.' : 'Pasa a recogerlo y paga en el puesto.', 'tone' => 'good'],
-            default => ['key' => 'preparing', 'step' => 3, 'title' => 'Tu pedido fue aceptado', 'text' => 'Lo estamos preparando.', 'tone' => 'good'],
+            $this->dispatched_at !== null => ['key' => 'on-the-way', 'step' => 4, 'title' => 'Tu pedido va en camino', 'text' => $paid ? 'Ya salió del puesto y quedó pagado.' : 'Ya salió del puesto. Ten tu dinero listo para pagar al recibirlo.', 'tone' => 'good'],
+            $this->ready_at !== null => ['key' => 'ready', 'step' => 4, 'title' => $delivery ? 'Tu pedido está listo' : '¡Tu pedido está listo!', 'text' => $delivery ? 'En un momento sale con el repartidor.' : ($paid ? 'Pasa a recogerlo. Ya quedó pagado.' : 'Pasa a recogerlo y paga en el puesto.'), 'tone' => 'good'],
+            default => ['key' => 'preparing', 'step' => 3, 'title' => 'Tu pedido fue aceptado', 'text' => $paid ? 'Ya quedó pagado. Lo estamos preparando.' : 'Lo estamos preparando.', 'tone' => 'good'],
         };
     }
 

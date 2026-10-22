@@ -62,7 +62,9 @@ new #[Layout('layouts::public')] #[Title('Tu pedido')] class extends Component
 @php
     $order = $this->order;
     $stage = $this->stage;
-    $paymentNote = $order->isDelivery() ? 'Pagas cuando te lo entregamos.' : 'Pagas cuando recoges tu pedido.';
+    $paymentNote = $order->status === \App\Enums\OrderStatus::Paid
+        ? 'Tu pedido ya quedó pagado.'
+        : ($order->isDelivery() ? 'Pagas cuando te lo entregamos.' : 'Pagas cuando recoges tu pedido.');
 @endphp
 
 <div class="mx-auto min-h-dvh max-w-xl pb-10"

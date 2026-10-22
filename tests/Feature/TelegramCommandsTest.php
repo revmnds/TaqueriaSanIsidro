@@ -9,6 +9,7 @@ use App\Support\Store;
 use App\Support\Telegram;
 use App\Support\TelegramBot;
 use App\Support\TelegramNotifier;
+use Carbon\CarbonInterface;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Cache;
@@ -34,6 +35,7 @@ class TelegramCommandsTest extends TestCase
         TelegramCommandsBotFake::$updates = [];
         TelegramCommandsNotifierFake::$reminded = [];
         TelegramCommandsNotifierFake::$summaries = 0;
+        TelegramCommandsNotifierFake::$summaryMoments = [];
         TelegramCommandsNotifierFake::$fail = false;
         $this->app->instance(TelegramBot::class, new TelegramCommandsBotFake);
         $this->app->instance(TelegramNotifier::class, new TelegramCommandsNotifierFake);
@@ -62,7 +64,7 @@ class TelegramCommandsTest extends TestCase
     public function test_poll_once_dispatches_updates_and_resumes_from_the_cached_offset(): void
     {
         $this->enableBot();
-        Cache::forever('telegram:offset', 41);
+        Cache::forever('telegram:offset:123', 41);
         $updates = [
             ['update_id' => 41, 'message' => ['text' => '/ayuda']],
             ['update_id' => 42, 'callback_query' => ['id' => 'button-42']],
@@ -88,7 +90,7 @@ class TelegramCommandsTest extends TestCase
 
         $this->artisan('telegram:poll', ['--once' => true])->assertSuccessful();
         $this->assertSame($updates, TelegramCommandsBotFake::$updates);
-        $this->assertSame(43, Cache::get('telegram:offset'));
+        $this->assertSame(43, Cache::get('telegram:offset:123'));
 
         $this->artisan('telegram:poll', ['--once' => true])->assertSuccessful();
 
@@ -118,13 +120,13 @@ class TelegramCommandsTest extends TestCase
 
         Exceptions::assertReported(RuntimeException::class);
         $this->assertSame($updates, TelegramCommandsBotFake::$updates);
-        $this->assertSame(12, Cache::get('telegram:offset'));
+        $this->assertSame(12, Cache::get('telegram:offset:123'));
     }
 
     public function test_poll_skips_updates_older_than_the_offset(): void
     {
         $this->enableBot();
-        Cache::forever('telegram:offset', 12);
+        Cache::forever('telegram:offset:123', 12);
         Http::fake([
             Telegram::api().'/bot123:abc/deleteWebhook' => Http::response(['ok' => true, 'result' => true]),
             Telegram::api().'/bot123:abc/getUpdates' => Http::response(['ok' => true, 'result' => [
@@ -135,7 +137,51 @@ class TelegramCommandsTest extends TestCase
         $this->artisan('telegram:poll', ['--once' => true])->assertSuccessful();
 
         $this->assertSame([['update_id' => 12]], TelegramCommandsBotFake::$updates);
-        $this->assertSame(13, Cache::get('telegram:offset'));
+        $this->assertSame(13, Cache::get('telegram:offset:123'));
+    }
+
+    public function test_poll_starts_at_the_new_bots_own_offset_after_switching_bots(): void
+    {
+        $this->enableBot();
+        Cache::forever('telegram:offset:123', 400);
+        Http::fake(function (Request $request) {
+            if (str_ends_with($request->url(), '/deleteWebhook')) {
+                return Http::response(['ok' => true, 'result' => true]);
+            }
+
+            $this->assertSame(0, $request['offset']);
+
+            return Http::response(['ok' => true, 'result' => [['update_id' => 1]]]);
+        });
+        Store::putSecret('telegram_token', '456:other-bot-token');
+
+        $this->artisan('telegram:poll', ['--once' => true])->assertSuccessful();
+
+        $this->assertSame([['update_id' => 1]], TelegramCommandsBotFake::$updates);
+        $this->assertSame(400, Cache::get('telegram:offset:123'));
+        $this->assertSame(2, Cache::get('telegram:offset:456'));
+    }
+
+    public function test_poll_does_not_process_old_bot_updates_after_the_bot_changes_mid_request(): void
+    {
+        $this->enableBot();
+        Http::fake(function (Request $request) {
+            if (str_ends_with($request->url(), '/deleteWebhook')) {
+                return Http::response(['ok' => true, 'result' => true]);
+            }
+
+            Store::putSecret('telegram_token', '456:other-bot-token');
+
+            return Http::response(['ok' => true, 'result' => [['update_id' => 41]]]);
+        });
+
+        $this->artisan('telegram:poll', ['--once' => true])
+            ->expectsOutputToContain('El bot cambió')
+            ->assertFailed();
+
+        $this->assertSame([], TelegramCommandsBotFake::$updates);
+        $this->assertFalse(Cache::has('telegram:offset:123'));
+        $this->assertFalse(Cache::has('telegram:offset:456'));
     }
 
     public function test_poll_explains_when_the_bot_is_not_connected(): void
@@ -150,7 +196,7 @@ class TelegramCommandsTest extends TestCase
     public function test_poll_once_preserves_the_offset_when_telegram_is_down(): void
     {
         $this->enableBot();
-        Cache::forever('telegram:offset', 42);
+        Cache::forever('telegram:offset:123', 42);
         Http::fake([
             Telegram::api().'/bot123:abc/deleteWebhook' => Http::response(['ok' => true, 'result' => true]),
             Telegram::api().'/bot123:abc/getUpdates' => Http::response([], 503),
@@ -160,7 +206,7 @@ class TelegramCommandsTest extends TestCase
             ->expectsOutputToContain('Telegram no respondió')
             ->assertFailed();
 
-        $this->assertSame(42, Cache::get('telegram:offset'));
+        $this->assertSame(42, Cache::get('telegram:offset:123'));
         $this->assertSame([], TelegramCommandsBotFake::$updates);
         Http::assertSentCount(2);
     }
@@ -230,13 +276,14 @@ class TelegramCommandsTest extends TestCase
         $this->artisan('telegram:alerts')->assertSuccessful();
 
         $this->assertSame(1, TelegramCommandsNotifierFake::$summaries);
-        $this->assertTrue(Cache::has('telegram:summary:2026-10-16'));
+        $this->assertTrue(Cache::has('telegram:summary:2026-10-15'));
 
         $this->travelTo(now()->setDate(2026, 10, 17)->setTime(0, 0));
         $this->artisan('telegram:alerts')->assertSuccessful();
 
         $this->assertSame(2, TelegramCommandsNotifierFake::$summaries);
-        $this->assertTrue(Cache::has('telegram:summary:2026-10-17'));
+        $this->assertTrue(Cache::has('telegram:summary:2026-10-16'));
+        $this->assertSame(['2026-10-15 23:59', '2026-10-16 23:59'], TelegramCommandsNotifierFake::$summaryMoments);
     }
 
     public function test_alerts_send_no_summary_in_manual_modes(): void
@@ -343,6 +390,8 @@ class TelegramCommandsNotifierFake extends TelegramNotifier
 
     public static int $summaries = 0;
 
+    public static array $summaryMoments = [];
+
     public static bool $fail = false;
 
     public static function remind(Order $order): void
@@ -354,8 +403,9 @@ class TelegramCommandsNotifierFake extends TelegramNotifier
         }
     }
 
-    public static function summary(): void
+    public static function summary(?CarbonInterface $at = null): void
     {
         self::$summaries++;
+        self::$summaryMoments[] = $at?->format('Y-m-d H:i');
     }
 }

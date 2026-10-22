@@ -20,7 +20,7 @@ COPY app ./app
 COPY public ./public
 RUN npm run build
 
-FROM php:8.4-fpm AS app
+FROM php:8.4.27-fpm AS app
 COPY --from=ghcr.io/mlocati/php-extension-installer:latest /usr/bin/install-php-extensions /usr/local/bin/
 RUN apt-get update \
     && apt-get install -y --no-install-recommends postgresql-client \

@@ -248,9 +248,7 @@ new #[Title('Corte de caja')] class extends Component
         $this->loadTotals();
         unset($this->expected, $this->difference);
 
-        $close = CashClose::whereDate('closed_on', $this->day())->first() ?? new CashClose(['closed_on' => $this->day()->toDateString()]);
-
-        $close->fill([
+        CashClose::updateOrCreate(['closed_on' => $this->day()->toDateString()], [
             'user_id' => auth()->id(),
             'opening' => $this->opening,
             'expected' => $this->expected,
@@ -258,7 +256,7 @@ new #[Title('Corte de caja')] class extends Component
             'kept' => is_numeric($this->kept) ? $this->kept : min((float) $this->opening, (float) $this->counted),
             'difference' => $this->difference,
             'notes' => $this->notes ?: null,
-        ])->save();
+        ]);
 
         unset($this->history, $this->saved);
         $this->dispatch('toast', message: 'Corte guardado');
@@ -426,11 +424,13 @@ new #[Title('Corte de caja')] class extends Component
                 {{-- Arqueo por billetes: se cuenta cada uno y el total pasa solo a Efectivo contado. --}}
                 <div class="mt-2" x-data="{
                         open: false,
+                        used: false,
                         bills: { 500: '', 200: '', 100: '', 50: '', 20: '' },
                         coins: '',
                         get sum() { return Object.entries(this.bills).reduce((t, [value, n]) => t + Number(value) * (Number(n) || 0), 0) + (Number(this.coins) || 0) },
                      }"
-                     x-effect="if (open && sum > 0) $wire.counted = String(Math.round(sum * 100) / 100)">
+                     @input="used = true"
+                     x-effect="if (open && used) $wire.counted = String(Math.round(sum * 100) / 100)">
                     <button type="button" class="btn-quiet -ml-2.5" @click="open = ! open" :aria-expanded="open">
                         <x-icon name="banknote" class="size-4" /> Contar por billetes
                     </button>

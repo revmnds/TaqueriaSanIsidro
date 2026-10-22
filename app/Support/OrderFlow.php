@@ -14,9 +14,10 @@ use Illuminate\Support\Facades\DB;
  */
 class OrderFlow
 {
-    public static function markReady(int $id): bool
+    public static function markReady(int $id, ?int $expectedVersion = null): bool
     {
         $changed = Order::whereKey($id)->whereIn('status', [OrderStatus::Open, OrderStatus::Paid])
+            ->when($expectedVersion !== null, fn ($query) => $query->where('version', $expectedVersion))
             ->whereNull('ready_at')->whereNull('dispatched_at')->whereNull('delivered_at')
             ->update(['ready_at' => now(), 'version' => DB::raw('version + 1')]);
 

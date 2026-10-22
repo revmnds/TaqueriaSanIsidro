@@ -3,9 +3,11 @@
 namespace App\Support;
 
 use App\Models\Setting;
+use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Crypt;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\RateLimiter;
@@ -137,7 +139,7 @@ class Telegram
     {
         $result = self::call('sendMessage', array_filter([
             'chat_id' => $chat,
-            'text' => mb_substr($text, 0, 4000),
+            'text' => $text,
             'parse_mode' => 'HTML',
             'disable_web_page_preview' => true,
             'reply_markup' => $markup,
@@ -152,7 +154,7 @@ class Telegram
         return self::call('editMessageText', [
             'chat_id' => $chat,
             'message_id' => $messageId,
-            'text' => mb_substr($text, 0, 4000),
+            'text' => $text,
             'parse_mode' => 'HTML',
             'disable_web_page_preview' => true,
             'reply_markup' => $markup ?? ['inline_keyboard' => []],
@@ -270,6 +272,7 @@ class Telegram
     public static function removeStaff(int|string $chatId): void
     {
         self::changeStaff(fn ($chats) => $chats->reject(fn ($c) => (string) $c['id'] === (string) $chatId));
+        DB::table('telegram_notices')->where('chat_id', $chatId)->delete();
         self::applyStaffUi((int) $chatId, false);
     }
 
@@ -321,10 +324,12 @@ class Telegram
     /** Código de 6 dígitos para vincular el Telegram del taquero; vale 10 minutos y una sola vez. */
     public static function newLinkCode(): string
     {
-        $code = str_pad((string) random_int(0, 999999), 6, '0', STR_PAD_LEFT);
-        Cache::put('telegram:link-code', Crypt::encryptString($code), 600);
+        return Cache::lock('telegram:link-code-lock', 10)->block(5, function () {
+            $code = str_pad((string) random_int(0, 999999), 6, '0', STR_PAD_LEFT);
+            Cache::put('telegram:link-code', Crypt::encryptString($code), 600);
 
-        return $code;
+            return $code;
+        });
     }
 
     /** Intenta vincular un chat con el código que escribió. Limitado por chat y en total para que no se adivine. */
@@ -343,19 +348,25 @@ class Telegram
         }
 
         try {
-            $stored = ($encrypted = Cache::get('telegram:link-code')) ? Crypt::decryptString($encrypted) : null;
-        } catch (Throwable) {
-            $stored = null;
-        }
+            return Cache::lock('telegram:link-code-lock', 10)->block(5, function () use ($chatId, $typed, $name) {
+                try {
+                    $stored = ($encrypted = Cache::get('telegram:link-code')) ? Crypt::decryptString($encrypted) : null;
+                } catch (Throwable) {
+                    $stored = null;
+                }
 
-        if ($stored === null || ! hash_equals($stored, trim($typed))) {
+                if ($stored === null || ! hash_equals($stored, trim($typed))) {
+                    return false;
+                }
+
+                self::addStaff($chatId, $name);
+                Cache::forget('telegram:link-code');
+
+                return true;
+            });
+        } catch (LockTimeoutException) {
             return false;
         }
-
-        Cache::forget('telegram:link-code');
-        self::addStaff($chatId, $name);
-
-        return true;
     }
 
     // ---- Mini App ----

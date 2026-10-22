@@ -57,6 +57,22 @@ php artisan app:create-user
 
 El logo subido vive en el volumen `storage` y la base en `db-data`.
 
+### Actualización de PHP del 21 de octubre de 2026
+
+Los Dockerfile de desarrollo y producción usan `php:8.4.27-fpm`, que incluye las correcciones de CVE-2026-109618 y CVE-2026-109619. El [aviso oficial de PHP](https://www.php.net/archive/2026.php#2026-10-21-5) incluye los servidores PHP-FPM y pide actualizar. Cambiar el código del repositorio no actualiza los contenedores que ya están funcionando.
+
+Desde el servidor, con las variables de producción cargadas, reconstruye y recrea los servicios PHP:
+
+```sh
+docker compose -f compose.prod.yaml build --pull app web
+docker compose -f compose.prod.yaml up -d --force-recreate app web reverb scheduler
+docker compose -f compose.prod.yaml exec app php -v
+docker compose -f compose.prod.yaml exec reverb php -v
+docker compose -f compose.prod.yaml exec scheduler php -v
+```
+
+Comprueba PHP 8.4.27 en los tres servicios. En Portainer, reconstruye las imágenes del stack y recrea esos servicios; comprueba la versión desde sus consolas. Conserva los volúmenes. `composer audit` revisa las bibliotecas del proyecto y no verifica la versión del motor PHP.
+
 El contenedor `taqueria-backup` respalda la base una vez al día en el volumen `backups` y guarda los últimos 14 días (`BACKUP_KEEP_DAYS`). Están en el mismo servidor: de vez en cuando conviene bajar uno a otro lado.
 
 ```sh

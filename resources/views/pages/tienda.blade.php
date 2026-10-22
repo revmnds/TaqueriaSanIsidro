@@ -539,7 +539,7 @@ new #[Title('Tienda en línea')] class extends Component
                     <label class="label" for="mp-secret">Clave secreta del webhook</label>
                     <input id="mp-secret" type="password" wire:model="mpWebhookSecret" autocomplete="new-password" class="input" placeholder="{{ $this->hasWebhookSecret ? 'Guardada. Escribe una nueva para cambiarla' : 'Opcional por ahora' }}">
                     @error('mpWebhookSecret') <p class="error">{{ $message }}</p> @enderror
-                    <p class="hint">En Mercado Pago, la dirección de notificaciones es <span class="font-semibold text-ink break-all">{{ url('/mercadopago/webhook') }}</span></p>
+                    <p class="hint">La dirección de notificaciones estará disponible cuando se termine la conexión con Mercado Pago.</p>
                 </div>
 
                 <label class="flex cursor-pointer items-center justify-between gap-4 rounded-xl border border-line px-4 py-3">

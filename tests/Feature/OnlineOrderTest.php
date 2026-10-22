@@ -215,15 +215,14 @@ class OnlineOrderTest extends TestCase
         $this->assertRejected([], 'lines', 'Taco de bistec');
     }
 
-    public function test_quantities_and_line_counts_are_capped(): void
+    public function test_quantities_are_capped_and_excess_lines_are_rejected(): void
     {
         $order = $this->place(['lines' => [['product_id' => $this->taco->id, 'qty' => 5000]]]);
         $this->assertSame(OnlineOrder::MAX_QUANTITY, $order->items->first()->quantity);
 
         RateLimiter::clear('online-order-ip|127.0.0.1');
         $many = array_fill(0, 100, ['product_id' => $this->taco->id, 'qty' => 1]);
-        $order = $this->place(['lines' => $many, 'phone' => '8689999999']);
-        $this->assertSame(OnlineOrder::MAX_LINES, $order->items->count());
+        $this->assertRejected(['lines' => $many, 'phone' => '8689999999'], 'lines', 'hasta 30 renglones');
     }
 
     public function test_the_same_form_sent_twice_creates_a_single_order(): void
